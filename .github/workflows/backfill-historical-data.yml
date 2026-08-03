@@ -1,0 +1,30 @@
+name: Backfill Historical Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Start Date (YYYY-MM-DD)'
+        required: true
+        default: '2020-10-19'
+      end_date:
+        description: 'End Date (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-04'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run batch -- ${{ github.event.inputs.start_date }} ${{ github.event.inputs.end_date }}
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v1.0.0
+          files: parquet/*.parquet
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
