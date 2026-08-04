@@ -16,13 +16,30 @@ jobs:
   backfill:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Runner Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/powershell
+          df -h
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
-      - run: npm run batch -- ${{ github.event.inputs.start_date }} ${{ github.event.inputs.end_date }}
-      - uses: softprops/action-gh-release@v1
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Batch Converter
+        run: npm run batch -- ${{ github.event.inputs.start_date }} ${{ github.event.inputs.end_date }}
+
+      - name: Upload Parquet Files to GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: v1.0.0
           files: parquet/*.parquet
