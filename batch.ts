@@ -96,11 +96,12 @@ async function main() {
             const tempCsv = path.join(outputDir, `temp_${ds}_${date}.csv`);
             fs.writeFileSync(tempCsv, csvContent, 'utf-8');
 
-            // Fixed SQL string without trailing space
             const cleanParquetPath = targetParquet.replace(/\\/g, '/');
             const cleanCsvPath = tempCsv.replace(/\\/g, '/');
+
+            // Explicit CSV parameters: delim=',', quote='"', ignore_errors=true
             await conn.run(
-              `COPY (SELECT * FROM read_csv_auto('${cleanCsvPath}')) TO '${cleanParquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD);`
+              `COPY (SELECT * FROM read_csv_auto('${cleanCsvPath}', delim=',', quote='"', ignore_errors=true)) TO '${cleanParquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD);`
             );
             fs.unlinkSync(tempCsv);
 
@@ -126,7 +127,6 @@ async function main() {
             console.warn(`  ⚠️ Upload batch failed for ${tag}: ${err.message}`);
           }
 
-          // Instant cleanup
           for (const p of generatedPaths) {
             if (fs.existsSync(p)) fs.unlinkSync(p);
           }
