@@ -11,6 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Delete v1.0.0 Release & Tag
-        run: gh release delete v1.0.0 --cleanup-tag --yes
+        run: gh release delete v1.0.0 --repo C-EO/pnw-historical-archives --cleanup-tag --yes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
