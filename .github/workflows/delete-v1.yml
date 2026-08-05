@@ -1,0 +1,16 @@
+name: Delete Messed Up v1.0.0 Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  delete-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete v1.0.0 Release & Tag
+        run: gh release delete v1.0.0 --cleanup-tag --yes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
