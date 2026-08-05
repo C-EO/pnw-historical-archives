@@ -15,13 +15,15 @@ jobs:
           echo "Fetching release info..."
           RELEASE_ID=$(gh api repos/C-EO/pnw-historical-archives/releases/tags/v1.0.0 --jq '.id' || true)
           if [ -n "$RELEASE_ID" ]; then
-            echo "Found Release ID $RELEASE_ID. Fetching asset IDs..."
-            ASSETS=$(gh api repos/C-EO/pnw-historical-archives/releases/$RELEASE_ID/assets --jq '.[].id' || true)
+            echo "Found Release ID $RELEASE_ID. Fetching all asset IDs with pagination..."
+            ASSETS=$(gh api repos/C-EO/pnw-historical-archives/releases/$RELEASE_ID/assets --paginate --jq '.[].id' || true)
+            COUNT=0
             for ASSET_ID in $ASSETS; do
-              echo "Deleting asset $ASSET_ID..."
+              COUNT=$((COUNT+1))
+              echo "Deleting asset $COUNT: $ASSET_ID..."
               gh api -X DELETE repos/C-EO/pnw-historical-archives/releases/assets/$ASSET_ID || true
             done
-            echo "Deleting release..."
+            echo "All $COUNT assets deleted. Deleting release..."
             gh release delete v1.0.0 --repo C-EO/pnw-historical-archives --cleanup-tag --yes
           else
             echo "Release v1.0.0 not found or already deleted."
