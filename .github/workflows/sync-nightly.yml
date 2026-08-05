@@ -23,13 +23,7 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Run Nightly Sync
+      - name: Run Nightly Sync & Direct Upload
         run: npm run sync
-
-      - name: Upload Parquet Files to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.0.0
-          files: parquet/*.parquet
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
