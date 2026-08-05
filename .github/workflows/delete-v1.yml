@@ -10,7 +10,21 @@ jobs:
   delete-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete v1.0.0 Release & Tag
-        run: gh release delete v1.0.0 --repo C-EO/pnw-historical-archives --cleanup-tag --yes
+      - name: Delete Assets and Release
+        run: |
+          echo "Fetching release info..."
+          RELEASE_ID=$(gh api repos/C-EO/pnw-historical-archives/releases/tags/v1.0.0 --jq '.id' || true)
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Found Release ID $RELEASE_ID. Fetching asset IDs..."
+            ASSETS=$(gh api repos/C-EO/pnw-historical-archives/releases/$RELEASE_ID/assets --jq '.[].id' || true)
+            for ASSET_ID in $ASSETS; do
+              echo "Deleting asset $ASSET_ID..."
+              gh api -X DELETE repos/C-EO/pnw-historical-archives/releases/assets/$ASSET_ID || true
+            done
+            echo "Deleting release..."
+            gh release delete v1.0.0 --repo C-EO/pnw-historical-archives --cleanup-tag --yes
+          else
+            echo "Release v1.0.0 not found or already deleted."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
