@@ -5,7 +5,7 @@ import path from 'path';
 import zlib from 'zlib';
 
 const DATASETS = ['wars', 'trades', 'cities', 'nations', 'alliances'];
-const BATCH_SIZE = 50; // Upload 50 files at once per CLI command
+const BATCH_SIZE = 50;
 
 function generateDateRange(startStr: string, endStr: string): string[] {
   const dates: string[] = [];
@@ -64,7 +64,6 @@ async function main() {
   for (const ds of DATASETS) {
     console.log(`\n📦 Dataset: ${ds.toUpperCase()} (${dates.length} dates)...`);
 
-    // Group dates by release tag (e.g. v2021-h1)
     const tagGroup = new Map<string, string[]>();
     for (const d of dates) {
       const tag = getReleaseTagForDate(d);
@@ -78,7 +77,6 @@ async function main() {
 
       if (pendingDates.length === 0) continue;
 
-      // Process in chunks of BATCH_SIZE (50 files)
       for (let i = 0; i < pendingDates.length; i += BATCH_SIZE) {
         const chunk = pendingDates.slice(i, i + BATCH_SIZE);
         const generatedPaths: string[] = [];
@@ -98,12 +96,19 @@ async function main() {
             const tempCsv = path.join(outputDir, `temp_${ds}_${date}.csv`);
             fs.writeFileSync(tempCsv, csvContent, 'utf-8');
 
+            // Fixed SQL string without trailing space
+            const cleanParquetPath = targetParquet.replace(/\\/g, '/');
+            const cleanCsvPath = tempCsv.replace(/\\/g, '/');
             await conn.run(
-              `COPY (SELECT * FROM read_csv_auto('${tempCsv.replace(/\\/g, '/')}')) TO '${targetParquet.replace(/\\/g, '/')} '(FORMAT PARQUET, COMPRESSION ZSTD);`
+              `COPY (SELECT * FROM read_csv_auto('${cleanCsvPath}')) TO '${cleanParquetPath}' (FORMAT PARQUET, COMPRESSION ZSTD);`
             );
             fs.unlinkSync(tempCsv);
-            generatedPaths.push(targetParquet);
-          } catch {
+
+            if (fs.existsSync(targetParquet)) {
+              generatedPaths.push(targetParquet);
+            }
+          } catch (err: any) {
+            console.warn(`  ⚠️ Conversion skipped for ${filename}: ${err.message}`);
             if (fs.existsSync(targetParquet)) fs.unlinkSync(targetParquet);
           }
         }
@@ -111,12 +116,19 @@ async function main() {
         if (generatedPaths.length > 0) {
           const fileArgs = generatedPaths.map((p) => `"${p}"`).join(' ');
           console.log(`  ⬆️ Uploading batch of ${generatedPaths.length} files to ${tag}...`);
-          execSync(`gh release upload ${tag} ${fileArgs} --clobber`, { stdio: 'inherit' });
+
+          try {
+            execSync(`gh release upload ${tag} ${fileArgs} --clobber`, { stdio: 'inherit' });
+            for (const p of generatedPaths) {
+              existingAssets.add(path.basename(p));
+            }
+          } catch (err: any) {
+            console.warn(`  ⚠️ Upload batch failed for ${tag}: ${err.message}`);
+          }
 
           // Instant cleanup
           for (const p of generatedPaths) {
             if (fs.existsSync(p)) fs.unlinkSync(p);
-            existingAssets.add(path.basename(p));
           }
         }
       }
