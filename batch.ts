@@ -5,7 +5,6 @@ import path from 'path';
 import zlib from 'zlib';
 
 const DATASETS = ['wars', 'trades', 'cities', 'nations', 'alliances'];
-const RELEASE_TAG = 'v1.0.0';
 
 function generateDateRange(startStr: string, endStr: string): string[] {
   const dates: string[] = [];
@@ -23,17 +22,44 @@ function delay(ms: number) {
 }
 
 /**
- * Fetches the set of already uploaded filenames from the GitHub release tag assets.
+ * Returns the release tag for a given date (e.g., v2021-h1 or v2021-h2).
+ * Each half-year tag holds ~900 assets max, staying safely below GitHub's 1000-file limit.
  */
-function getRemoteReleaseAssets(tag: string): Set<string> {
+function getReleaseTagForDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  const year = d.getUTCFullYear();
+  const half = d.getUTCMonth() < 6 ? 'h1' : 'h2';
+  return `v${year}-${half}`;
+}
+
+const knownTags = new Set<string>();
+const remoteAssetsMap = new Map<string, Set<string>>();
+
+/**
+ * Ensures a GitHub Release tag exists, creating it automatically if missing.
+ */
+function ensureRelease(tag: string): Set<string> {
+  if (remoteAssetsMap.has(tag)) {
+    return remoteAssetsMap.get(tag)!;
+  }
+
   try {
     const out = execSync(`gh release view ${tag} --json assets --jq ".assets[].name"`, {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    return new Set(out.split('\n').map((s) => s.trim()).filter(Boolean));
+    const assets = new Set(out.split('\n').map((s) => s.trim()).filter(Boolean));
+    remoteAssetsMap.set(tag, assets);
+    return assets;
   } catch {
-    return new Set();
+    // Tag does not exist yet; create it
+    console.log(`✨ Creating new GitHub Release tag: ${tag}...`);
+    execSync(`gh release create ${tag} --title "PnW Parquet Archives ${tag}" --notes "Daily Parquet Extracts for ${tag}"`, {
+      stdio: 'inherit',
+    });
+    const assets = new Set<string>();
+    remoteAssetsMap.set(tag, assets);
+    return assets;
   }
 }
 
@@ -41,13 +67,10 @@ async function main() {
   const startDate = process.argv[2] || '2020-10-19';
   const endDate = process.argv[3] || new Date().toISOString().split('T')[0];
 
-  console.log(`🚀 Starting Historical Backfill: ${startDate} to ${endDate}...`);
+  console.log(`🚀 Starting Historical Backfill with Half-Year Tags: ${startDate} to ${endDate}...`);
 
   const outputDir = path.resolve('./parquet');
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
-  const remoteAssets = getRemoteReleaseAssets(RELEASE_TAG);
-  console.log(`ℹ️ Found ${remoteAssets.size} files already attached to ${RELEASE_TAG} release.`);
 
   const dates = generateDateRange(startDate, endDate);
   const instance = await DuckDBInstance.create(':memory:');
@@ -57,11 +80,14 @@ async function main() {
     console.log(`\n📦 Processing dataset: ${ds.toUpperCase()} (${dates.length} snapshots)...`);
 
     for (const date of dates) {
+      const tag = getReleaseTagForDate(date);
       const filename = `${ds}-${date}.parquet`;
       const targetParquet = path.join(outputDir, filename);
 
-      // Skip if already uploaded to GitHub Release
-      if (remoteAssets.has(filename)) {
+      const existingAssets = ensureRelease(tag);
+
+      // Skip if already uploaded to the corresponding release tag
+      if (existingAssets.has(filename)) {
         continue;
       }
 
@@ -83,18 +109,19 @@ async function main() {
         );
         fs.unlinkSync(tempCsv);
 
-        // Upload immediately to GitHub Release via gh CLI
-        execSync(`gh release upload ${RELEASE_TAG} "${targetParquet}" --clobber`, { stdio: 'inherit' });
+        // Upload immediately to the half-year release tag via gh CLI
+        execSync(`gh release upload ${tag} "${targetParquet}" --clobber`, { stdio: 'inherit' });
+        existingAssets.add(filename);
 
         // Delete local Parquet file immediately to keep disk space at 0 MB
         fs.unlinkSync(targetParquet);
 
-        console.log(`  ✅ [${ds.toUpperCase()}] Uploaded ${filename}`);
+        console.log(`  ✅ [${ds.toUpperCase()}] Uploaded ${filename} -> ${tag}`);
 
-        // Micro-throttle delay to respect GitHub API secondary rate limits
+        // Micro-throttle delay
         await delay(100);
       } catch (err: any) {
-        console.warn(`  ⚠️ Failed ${filename}: ${err.message}`);
+        console.warn(`  ⚠️ Failed ${filename} (${tag}): ${err.message}`);
         if (fs.existsSync(targetParquet)) fs.unlinkSync(targetParquet);
       }
     }
