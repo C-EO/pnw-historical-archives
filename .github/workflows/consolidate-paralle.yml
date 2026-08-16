@@ -1,0 +1,45 @@
+name: Consolidate Annual Archives (Parallel Matrix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: 'Start Year'
+        required: true
+        default: '2020'
+      end_year:
+        description: 'End Year'
+        required: true
+        default: '2026'
+
+permissions:
+  contents: write
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dataset: [nations, alliances, cities, wars, trades]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Consolidation for ${{ matrix.dataset }}
+        run: npx tsx consolidate.ts ${{ matrix.dataset }} ${{ github.event.inputs.start_year }} ${{ github.event.inputs.end_year }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
