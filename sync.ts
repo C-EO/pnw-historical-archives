@@ -4,7 +4,13 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 
-const DATASETS = ['wars', 'trades', 'cities', 'nations', 'alliances'];
+const DATASETS: { name: string; sortKey: string }[] = [
+  { name: 'nations', sortKey: 'nation_id' },
+  { name: 'alliances', sortKey: 'alliance_id' },
+  { name: 'cities', sortKey: 'nation_id, city_id' },
+  { name: 'wars', sortKey: 'war_id' },
+  { name: 'trades', sortKey: 'trade_id' },
+];
 
 function getYesterdayDate(): string {
   const d = new Date();
@@ -12,29 +18,24 @@ function getYesterdayDate(): string {
   return d.toISOString().split('T')[0];
 }
 
-function getReleaseTagForDate(dateStr: string): string {
-  const d = new Date(dateStr);
-  const year = d.getUTCFullYear();
-  const half = d.getUTCMonth() < 6 ? 'h1' : 'h2';
-  return `v${year}-${half}`;
-}
-
 function ensureRelease(tag: string) {
   try {
     execSync(`gh release view ${tag}`, { stdio: 'ignore' });
   } catch {
-    console.log(`✨ Creating new GitHub Release tag: ${tag}...`);
-    execSync(`gh release create ${tag} --title "PnW Parquet Archives ${tag}" --notes "Daily Parquet Extracts for ${tag}"`, {
-      stdio: 'inherit',
-    });
+    console.log(`✨ Creating GitHub Release tag: ${tag}...`);
+    execSync(
+      `gh release create ${tag} --title "PnW Parquet Archives ${tag}" --notes "Annual Consolidated Archives for ${tag}"`,
+      { stdio: 'inherit' }
+    );
   }
 }
 
 async function main() {
   const date = process.argv[2] || getYesterdayDate();
-  const tag = getReleaseTagForDate(date);
+  const year = date.split('-')[0]!;
+  const tag = `v${year}`;
 
-  console.log(`🚀 Starting Nightly PnW Archive Sync for ${date} (Target Release: ${tag})...`);
+  console.log(`🚀 Starting Nightly PnW Archive Sync for ${date} (Target: ${tag})...`);
 
   const outputDir = path.resolve('./parquet');
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
@@ -44,13 +45,13 @@ async function main() {
   const instance = await DuckDBInstance.create(':memory:');
   const conn = await instance.connect();
 
-  for (const ds of DATASETS) {
-    const filename = `${ds}-${date}.parquet`;
+  for (const { name: ds, sortKey } of DATASETS) {
+    const annualFilename = `${ds}-${year}.parquet`;
+    const targetAnnualParquet = path.join(outputDir, annualFilename);
     const url = `https://politicsandwar.com/data/${ds}/${ds}-${date}.csv.zip`;
-    const targetParquet = path.join(outputDir, filename);
 
     try {
-      console.log(`📥 Fetching ${ds}...`);
+      console.log(`📥 Fetching daily dump for ${ds} (${date})...`);
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -60,27 +61,64 @@ async function main() {
       const tempCsv = path.join(outputDir, `temp_${ds}.csv`);
       fs.writeFileSync(tempCsv, csvContent, 'utf-8');
 
-      // Convert to Parquet
-      await conn.run(
-        `COPY (SELECT * FROM read_csv_auto('${tempCsv.replace(/\\/g, '/')}')) TO '${targetParquet.replace(/\\/g, '/')}' (FORMAT PARQUET, COMPRESSION ZSTD);`
-      );
+      // Check if existing annual parquet exists on release
+      let hasExisting = false;
+      try {
+        execSync(`gh release download ${tag} -p "${annualFilename}" -D "${outputDir}" --clobber`, {
+          stdio: 'ignore',
+        });
+        hasExisting = fs.existsSync(targetAnnualParquet);
+      } catch {
+        hasExisting = false;
+      }
+
+      const tempParquetOut = path.join(outputDir, `new_${annualFilename}`);
+      const cleanCsvPath = tempCsv.replace(/\\/g, '/');
+      const cleanTarget = targetAnnualParquet.replace(/\\/g, '/');
+      const cleanOut = tempParquetOut.replace(/\\/g, '/');
+
+      if (hasExisting) {
+        console.log(`  🔄 Appending ${date} to existing ${annualFilename}...`);
+        await conn.run(`
+          CREATE TABLE updated AS 
+          SELECT * FROM read_parquet('${cleanTarget}') 
+          WHERE snapshot_date != '${date}'
+          UNION ALL BY NAME 
+          SELECT *, CAST('${date}' AS DATE) as snapshot_date 
+          FROM read_csv_auto('${cleanCsvPath}', delim=',', quote='"', ignore_errors=true);
+        `);
+      } else {
+        console.log(`  🆕 Creating new annual ${annualFilename}...`);
+        await conn.run(`
+          CREATE TABLE updated AS 
+          SELECT *, CAST('${date}' AS DATE) as snapshot_date 
+          FROM read_csv_auto('${cleanCsvPath}', delim=',', quote='"', ignore_errors=true);
+        `);
+      }
+
+      // Write sorted Parquet with ZSTD compression
+      await conn.run(`
+        COPY (SELECT * FROM updated ORDER BY ${sortKey}, snapshot_date) 
+        TO '${cleanOut}' (FORMAT PARQUET, COMPRESSION ZSTD);
+      `);
+      await conn.run(`DROP TABLE updated;`);
+
       fs.unlinkSync(tempCsv);
+      if (fs.existsSync(targetAnnualParquet)) fs.unlinkSync(targetAnnualParquet);
+      fs.renameSync(tempParquetOut, targetAnnualParquet);
 
-      // Upload directly to the corresponding half-year release tag
-      execSync(`gh release upload ${tag} "${targetParquet}" --clobber`, { stdio: 'inherit' });
+      // Upload updated annual file to GitHub Releases
+      execSync(`gh release upload ${tag} "${targetAnnualParquet}" --clobber`, { stdio: 'inherit' });
+      fs.unlinkSync(targetAnnualParquet);
 
-      // Delete local Parquet file immediately
-      fs.unlinkSync(targetParquet);
-
-      console.log(`  ✅ Uploaded ${filename} -> ${tag}`);
+      console.log(`  ✅ Uploaded updated ${annualFilename} -> ${tag}`);
     } catch (err: any) {
       console.warn(`  ⚠️ Failed ${ds}: ${err.message}`);
-      if (fs.existsSync(targetParquet)) fs.unlinkSync(targetParquet);
     }
   }
 
   conn.disconnectSync();
-  console.log('🎉 Nightly Sync & Direct Upload Complete!');
+  console.log('🎉 Nightly Sync & Annual Consolidation Complete!');
 }
 
 function extractFirstCsvFromZip(bytes: Uint8Array): string {
