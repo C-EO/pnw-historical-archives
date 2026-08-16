@@ -7,7 +7,7 @@
     "sync": "tsx sync.ts",
     "batch": "tsx batch.ts",
     "consolidate": "tsx consolidate.ts"
-  }
+  },
   "dependencies": {
     "@duckdb/node-api": "^1.5.5-r.3"
   },
