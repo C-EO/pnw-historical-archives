@@ -27,67 +27,97 @@ function ensureRelease(tag: string) {
 
 async function main() {
   const dataset = process.argv[2] || 'nations';
-  const sortKey = DATASET_SORT_KEYS[dataset] || 'nation_id';
+  const sortKey = DATASET_SORT_KEYS[dataset] || 'id';
   const targetTag = 'v-master';
 
-  console.log(`🚀 Merging ${dataset.toUpperCase()} (2020-2025) into ${dataset}-history.parquet...`);
+  console.log(`🚀 Streaming Master Consolidation for ${dataset.toUpperCase()} (2020-2025)...`);
 
   const outputDir = path.resolve('./master_build');
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   ensureRelease(targetTag);
 
-  // Download the 6 annual files from existing releases
-  const annualFilePaths: string[] = [];
+  // Use persistent on-disk DuckDB database file (Zero RAM overflow)
+  const dbPath = path.join(outputDir, `${dataset}_temp.duckdb`);
+  if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+
+  const instance = await DuckDBInstance.create(dbPath);
+  const conn = await instance.connect();
+
+  // DuckDB safety & performance settings
+  await conn.run(`SET preserve_insertion_order = false;`);
+  await conn.run(`SET memory_limit = '4GB';`);
+  await conn.run(`SET threads = 2;`);
+
+  let tableCreated = false;
 
   for (const year of PAST_YEARS) {
     const filename = `${dataset}-${year}.parquet`;
     const targetPath = path.join(outputDir, filename);
     const releaseTag = `v${year}`;
 
-    console.log(`  📥 Downloading ${filename} from ${releaseTag}...`);
+    console.log(`\n📥 Downloading & Streaming ${filename} from ${releaseTag}...`);
     try {
       execSync(`gh release download ${releaseTag} -p "${filename}" -D "${outputDir}" --clobber`, {
         stdio: 'inherit',
       });
-      if (fs.existsSync(targetPath)) {
-        annualFilePaths.push(targetPath);
-      }
     } catch (err: any) {
       console.warn(`  ⚠️ Could not download ${filename}: ${err.message}`);
+      continue;
     }
+
+    if (!fs.existsSync(targetPath)) continue;
+
+    const cleanParquetPath = targetPath.replace(/\\/g, '/');
+
+    if (!tableCreated) {
+      console.log(`  🏗️ Initializing master table with ${year}...`);
+      await conn.run(`
+        CREATE TABLE master_table AS 
+        SELECT * FROM read_parquet('${cleanParquetPath}')
+        ORDER BY ${sortKey}, snapshot_date;
+      `);
+      tableCreated = true;
+    } else {
+      console.log(`  ➕ Appending and sorting ${year} into master table...`);
+      await conn.run(`
+        INSERT INTO master_table 
+        SELECT * FROM read_parquet('${cleanParquetPath}')
+        ORDER BY ${sortKey}, snapshot_date;
+      `);
+    }
+
+    // Delete the single annual file immediately to save runner disk space
+    fs.unlinkSync(targetPath);
+    console.log(`  🧹 Freed local disk space for ${filename}`);
   }
 
-  if (annualFilePaths.length === 0) {
-    throw new Error(`No annual files found for ${dataset}`);
+  if (!tableCreated) {
+    conn.disconnectSync();
+    throw new Error(`No files were successfully processed for ${dataset}`);
   }
 
-  console.log(`\n⚡ Merging and sorting ${annualFilePaths.length} annual files with DuckDB...`);
-  const instance = await DuckDBInstance.create(':memory:');
-  const conn = await instance.connect();
-
+  console.log(`\n⚡ Exporting master table directly to ${dataset}-history.parquet (ZSTD)...`);
   const masterParquetPath = path.join(outputDir, `${dataset}-history.parquet`);
-  const cleanList = annualFilePaths.map((p) => `'${p.replace(/\\/g, '/')}'`).join(', ');
+  const cleanMasterPath = masterParquetPath.replace(/\\/g, '/');
 
   await conn.run(`
-    COPY (
-      SELECT * FROM read_parquet([${cleanList}], union_by_name=true)
-      ORDER BY ${sortKey}, snapshot_date
-    ) TO '${masterParquetPath.replace(/\\/g, '/')}' (FORMAT PARQUET, COMPRESSION ZSTD);
+    COPY master_table TO '${cleanMasterPath}' (FORMAT PARQUET, COMPRESSION ZSTD);
   `);
 
   conn.disconnectSync();
 
+  // Remove temporary DuckDB database file
+  if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  const walPath = `${dbPath}.wal`;
+  if (fs.existsSync(walPath)) fs.unlinkSync(walPath);
+
   console.log(`⬆️ Uploading ${dataset}-history.parquet to release ${targetTag}...`);
   execSync(`gh release upload ${targetTag} "${masterParquetPath}" --clobber`, { stdio: 'inherit' });
 
-  // Cleanup local files
-  for (const p of annualFilePaths) {
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-  }
   if (fs.existsSync(masterParquetPath)) fs.unlinkSync(masterParquetPath);
 
-  console.log(`🎉 Master archive ${dataset}-history.parquet successfully created and uploaded!`);
+  console.log(`\n🎉 Unified Master Archive ${dataset}-history.parquet successfully created and uploaded!`);
 }
 
 main().catch((err) => {
