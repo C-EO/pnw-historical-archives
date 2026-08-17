@@ -15,7 +15,7 @@ const DATASETS: { name: string; sortKey: string }[] = [
 function getYesterdayDate(): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().split('T')[0];
+  return d.toISOString().split('T')[0]!;
 }
 
 function ensureRelease(tag: string) {
@@ -41,9 +41,12 @@ async function main() {
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   ensureRelease(tag);
+  ensureRelease('v-manifest');
 
   const instance = await DuckDBInstance.create(':memory:');
   const conn = await instance.connect();
+
+  let maxNationIdForYear: number | null = null;
 
   for (const { name: ds, sortKey } of DATASETS) {
     const annualFilename = `${ds}-${year}.parquet`;
@@ -96,6 +99,14 @@ async function main() {
         `);
       }
 
+      if (ds === 'nations') {
+        const maxReader = await conn.runAndReadAll(`SELECT MAX(CAST(nation_id AS BIGINT)) FROM updated;`);
+        const maxRow = maxReader.getRows()[0];
+        if (maxRow && maxRow[0]) {
+          maxNationIdForYear = Number(maxRow[0]);
+        }
+      }
+
       // Write sorted Parquet with ZSTD compression
       await conn.run(`
         COPY (SELECT * FROM updated ORDER BY ${sortKey}, snapshot_date) 
@@ -115,6 +126,37 @@ async function main() {
     } catch (err: any) {
       console.warn(`  ⚠️ Failed ${ds}: ${err.message}`);
     }
+  }
+
+  // Update manifest.json if nations was updated
+  if (maxNationIdForYear !== null) {
+    const manifestPath = path.resolve('./manifest.json');
+    let manifestData: { updatedAt: string; nations: Record<string, number> } = {
+      updatedAt: new Date().toISOString(),
+      nations: {},
+    };
+
+    try {
+      execSync(`gh release download v-manifest -p "manifest.json" -D "${outputDir}" --clobber`, {
+        stdio: 'ignore',
+      });
+      const downloadedManifest = path.join(outputDir, 'manifest.json');
+      if (fs.existsSync(downloadedManifest)) {
+        manifestData = JSON.parse(fs.readFileSync(downloadedManifest, 'utf-8'));
+        fs.unlinkSync(downloadedManifest);
+      }
+    } catch {
+      if (fs.existsSync(manifestPath)) {
+        manifestData = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      }
+    }
+
+    manifestData.updatedAt = new Date().toISOString();
+    manifestData.nations[year] = maxNationIdForYear;
+
+    fs.writeFileSync(manifestPath, JSON.stringify(manifestData, null, 2), 'utf-8');
+    execSync(`gh release upload v-manifest "${manifestPath}" --clobber`, { stdio: 'inherit' });
+    console.log(`📋 Updated and published manifest.json -> v-manifest (Max Nation ID for ${year}: ${maxNationIdForYear})`);
   }
 
   conn.disconnectSync();
