@@ -26,7 +26,7 @@ function ensureRelease(tag: string) {
 }
 
 async function main() {
-  const dataset = process.argv[2] || 'nations';
+  const dataset = process.argv[2] || 'cities';
   const sortKey = DATASET_SORT_KEYS[dataset] || 'id';
   const targetTag = 'v-master';
 
@@ -37,64 +37,63 @@ async function main() {
 
   ensureRelease(targetTag);
 
-  // Use persistent on-disk DuckDB database file (Zero RAM overflow)
+  // Use persistent on-disk DuckDB database file
   const dbPath = path.join(outputDir, `${dataset}_temp.duckdb`);
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
 
   const instance = await DuckDBInstance.create(dbPath);
   const conn = await instance.connect();
 
-  // DuckDB safety & performance settings
   await conn.run(`SET preserve_insertion_order = false;`);
   await conn.run(`SET memory_limit = '4GB';`);
   await conn.run(`SET threads = 2;`);
 
-  let tableCreated = false;
-
+  // Download all 6 annual files to inspect full schema
+  const annualFilePaths: string[] = [];
   for (const year of PAST_YEARS) {
     const filename = `${dataset}-${year}.parquet`;
     const targetPath = path.join(outputDir, filename);
     const releaseTag = `v${year}`;
 
-    console.log(`\n📥 Downloading & Streaming ${filename} from ${releaseTag}...`);
+    console.log(`📥 Downloading ${filename} from ${releaseTag}...`);
     try {
       execSync(`gh release download ${releaseTag} -p "${filename}" -D "${outputDir}" --clobber`, {
         stdio: 'inherit',
       });
+      if (fs.existsSync(targetPath)) annualFilePaths.push(targetPath);
     } catch (err: any) {
       console.warn(`  ⚠️ Could not download ${filename}: ${err.message}`);
-      continue;
     }
-
-    if (!fs.existsSync(targetPath)) continue;
-
-    const cleanParquetPath = targetPath.replace(/\\/g, '/');
-
-    if (!tableCreated) {
-      console.log(`  🏗️ Initializing master table with ${year}...`);
-      await conn.run(`
-        CREATE TABLE master_table AS 
-        SELECT * FROM read_parquet('${cleanParquetPath}')
-        ORDER BY ${sortKey}, snapshot_date;
-      `);
-      tableCreated = true;
-    } else {
-      console.log(`  ➕ Appending and sorting ${year} into master table...`);
-      await conn.run(`
-        INSERT INTO master_table 
-        SELECT * FROM read_parquet('${cleanParquetPath}')
-        ORDER BY ${sortKey}, snapshot_date;
-      `);
-    }
-
-    // Delete the single annual file immediately to save runner disk space
-    fs.unlinkSync(targetPath);
-    console.log(`  🧹 Freed local disk space for ${filename}`);
   }
 
-  if (!tableCreated) {
+  if (annualFilePaths.length === 0) {
     conn.disconnectSync();
-    throw new Error(`No files were successfully processed for ${dataset}`);
+    throw new Error(`No files downloaded for ${dataset}`);
+  }
+
+  // 1. Create master schema with union_by_name (handles 37 vs 38 columns automatically)
+  console.log(`\n🏗️ Initializing master table schema with all columns across all years...`);
+  const cleanList = annualFilePaths.map((p) => `'${p.replace(/\\/g, '/')}'`).join(', ');
+  await conn.run(`
+    CREATE TABLE master_table AS 
+    SELECT * FROM read_parquet([${cleanList}], union_by_name=true) 
+    LIMIT 0;
+  `);
+
+  // 2. Stream insert each year with BY NAME mapping
+  for (const filePath of annualFilePaths) {
+    const cleanPath = filePath.replace(/\\/g, '/');
+    const filename = path.basename(filePath);
+
+    console.log(`➕ Appending and sorting ${filename} BY NAME into master table...`);
+    await conn.run(`
+      INSERT INTO master_table BY NAME 
+      SELECT * FROM read_parquet('${cleanPath}')
+      ORDER BY ${sortKey}, snapshot_date;
+    `);
+
+    fs.unlinkSync(filePath);
+    console.log(`  🧹 Freed local disk space for ${filename}`);
   }
 
   console.log(`\n⚡ Exporting master table directly to ${dataset}-history.parquet (ZSTD)...`);
@@ -107,7 +106,7 @@ async function main() {
 
   conn.disconnectSync();
 
-  // Remove temporary DuckDB database file
+  // Remove temporary database
   if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
   const walPath = `${dbPath}.wal`;
   if (fs.existsSync(walPath)) fs.unlinkSync(walPath);
