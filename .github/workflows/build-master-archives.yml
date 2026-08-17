@@ -11,16 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        dataset: [nations, alliances, cities, wars, trades]
+        dataset: [cities]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Free Runner Disk Space
+      - name: Free Maximum Runner Disk Space (35GB+)
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/powershell
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -30,7 +31,7 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Merge Annual Archives into Master History for ${{ matrix.dataset }}
+      - name: Stream Master Archive for ${{ matrix.dataset }}
         run: npx tsx build-master.ts ${{ matrix.dataset }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
