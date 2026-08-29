@@ -145,13 +145,56 @@ async function main() {
   for (const rel of tagsToDelete) {
     console.log(`⏳ Processing release ${rel.tagName} (id=${rel.id})...`);
 
-    // 1) List assets for the release (via gh api for more control and paging if needed)
+    // 1) List assets for the release (paged, with retries) to avoid ENOBUFS
     let assets: Array<{ id: number; name: string }> = [];
     try {
-      // Use API to avoid heavy CLI wrappers; jq here keeps returned objects small-ish
-      const assetsOut = runCmd(`gh api repos/${owner}/${repo}/releases/${rel.id} --jq '.assets'`, true);
-      const parsed = JSON.parse(assetsOut || '[]');
-      assets = Array.isArray(parsed) ? parsed.map((a: any) => ({ id: a.id, name: a.name })) : [];
+      const perPage = 50; // adjust smaller if necessary
+      let page = 1;
+      let finished = false;
+
+      while (!finished) {
+        let attempt = 0;
+        let backoff = 500;
+        let pageItems: any[] = [];
+
+        while (attempt < 5) {
+          attempt++;
+          try {
+            const pageOut = runCmd(
+              `gh api repos/${owner}/${repo}/releases/${rel.id}/assets?per_page=${perPage}&page=${page} --jq '.'`,
+              true,
+            );
+            pageItems = JSON.parse(pageOut || '[]');
+            break;
+          } catch (err: any) {
+            const msg = (err.stderr && err.stderr.toString && err.stderr.toString()) || err.message || String(err);
+            console.warn(`      ⚠️ assets page fetch failed (release ${rel.id}) attempt ${attempt}: ${msg.split('\n').slice(0,4).join('\n')}`);
+            if (!isTransientError(msg)) {
+              // non-transient — abort asset paging
+              pageItems = [];
+              finished = true;
+              break;
+            }
+            // transient: wait and retry
+            await sleep(backoff);
+            backoff *= 2;
+          }
+        }
+
+        if (!pageItems || pageItems.length === 0) {
+          // no results => done
+          break;
+        }
+
+        assets.push(...pageItems.map((a: any) => ({ id: a.id, name: a.name })));
+
+        // if fewer than perPage returned, we're done
+        if (pageItems.length < perPage) finished = true;
+        else page++;
+
+        // small pause between pages to reduce burst pressure
+        await sleep(200);
+      }
     } catch (err: any) {
       console.warn(`   ⚠️ Could not list assets for ${rel.tagName}: ${(err && err.message) || String(err)}`);
     }
