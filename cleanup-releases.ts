@@ -3,7 +3,7 @@ import { execSync } from 'child_process';
 const PROTECTED_TAGS = new Set(['v-master', 'v-manifest', 'v2026']);
 
 // Config
-const DRY_RUN = true; // set to false to actually perform deletes
+const DRY_RUN = false; // set to false to actually perform deletes
 const CHUNK_SIZE = 50; // delete assets in batches of this size
 const ASSET_DELETE_RETRIES = 5;
 const RELEASE_DELETE_RETRIES = 5;
