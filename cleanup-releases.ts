@@ -160,8 +160,9 @@ async function main() {
         while (attempt < 5) {
           attempt++;
           try {
+            // Quote the endpoint because of the '&' in the query string (prevents shell backgrounding)
             const pageOut = runCmd(
-              `gh api repos/${owner}/${repo}/releases/${rel.id}/assets?per_page=${perPage}&page=${page} --jq '.'`,
+              `gh api 'repos/${owner}/${repo}/releases/${rel.id}/assets?per_page=${perPage}&page=${page}' --jq '.'`,
               true,
             );
             pageItems = JSON.parse(pageOut || '[]');
