@@ -107,8 +107,13 @@ async function main() {
   const [owner, repo] = repoEnv.split('/');
 
   // Fetch all releases in the repository (tagName, name, id)
-  const output = runCmd('gh release list --limit 100 --json tagName,name,id', true);
-  const releases: Array<{ tagName: string; name: string; id: number | string }> = JSON.parse(output || '[]');
+  const output = runCmd(`gh api repos/${owner}/${repo}/releases --paginate --jq '.'`, true);
+  const apiReleases = JSON.parse(output || '[]');
+  const releases: Array<{ tagName: string; name: string; id: number | string }> = apiReleases.map((r: any) => ({
+    tagName: r.tag_name,
+    name: r.name,
+    id: r.id,
+  }));
   console.log(`🔍 Found ${releases.length} total releases in repository.\n`);
 
   const tagsToDelete = releases.filter((r) => !PROTECTED_TAGS.has(r.tagName));
