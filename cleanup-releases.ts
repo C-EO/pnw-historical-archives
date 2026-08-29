@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 const PROTECTED_TAGS = new Set(['v-master', 'v-manifest', 'v2026']);
 
 // Config
+const DRY_RUN = true; // set to false to actually perform deletes
 const CHUNK_SIZE = 50; // delete assets in batches of this size
 const ASSET_DELETE_RETRIES = 5;
 const RELEASE_DELETE_RETRIES = 5;
@@ -34,8 +35,11 @@ async function deleteAssetWithRetries(owner: string, repo: string, assetId: numb
     attempt++;
     try {
       console.log(`      → Deleting asset ${assetId} (attempt ${attempt})`);
-      // Use gh api to delete the asset
-      execSync(`gh api --method DELETE ${assetUrl}`, { stdio: 'inherit' });
+      if (!DRY_RUN) {
+        execSync(`gh api --method DELETE ${assetUrl}`, { stdio: 'inherit' });
+      } else {
+        console.log(`        [dry-run] would run: gh api --method DELETE ${assetUrl}`);
+      }
       console.log(`      ✅ Asset ${assetId} deleted`);
       return true;
     } catch (err: any) {
@@ -66,7 +70,11 @@ async function deleteReleaseWithRetries(tagName: string, releaseId: number | str
     attempt++;
     try {
       console.log(`   Attempt ${attempt}: gh release delete "${tagName}" --cleanup-tag --yes`);
-      execSync(`gh release delete "${tagName}" --cleanup-tag --yes`, { stdio: 'inherit' });
+      if (!DRY_RUN) {
+        execSync(`gh release delete "${tagName}" --cleanup-tag --yes`, { stdio: 'inherit' });
+      } else {
+        console.log(`      [dry-run] would run: gh release delete "${tagName}" --cleanup-tag --yes`);
+      }
       console.log(`   ✅ Successfully wiped ${tagName}.\n`);
       return true;
     } catch (err: any) {
@@ -101,14 +109,21 @@ function chunkArray<T>(arr: T[], size: number) {
 async function main() {
   console.log('🧹 Starting Almighty Release Cleanup...\n');
   console.log(`🛡️ Protected Releases: [${Array.from(PROTECTED_TAGS).join(', ')}]\n`);
+  if (DRY_RUN) console.log('⚠️ Running in DRY_RUN mode — no deletes will be performed.\n');
 
   // Determine owner/repo
   const repoEnv = process.env.GITHUB_REPOSITORY || 'C-EO/pnw-historical-archives';
   const [owner, repo] = repoEnv.split('/');
 
-  // Fetch all releases in the repository (tagName, name, id)
-  const output = runCmd(`gh api repos/${owner}/${repo}/releases --paginate --jq '.'`, true);
-  const apiReleases = JSON.parse(output || '[]');
+  // Fetch only the fields we need (one small JSON object per line)
+  const output = runCmd(
+    `gh api repos/${owner}/${repo}/releases --paginate --jq '.[] | {id: .id, tag_name: .tag_name, name: .name}'`,
+    true,
+  );
+
+  // gh --jq emits one JSON object per line here; parse line-by-line to avoid huge single-buffer JSON
+  const lines = (output || '').trim().split(/\r?\n/).filter(Boolean);
+  const apiReleases = lines.map((l) => JSON.parse(l));
   const releases: Array<{ tagName: string; name: string; id: number | string }> = apiReleases.map((r: any) => ({
     tagName: r.tag_name,
     name: r.name,
@@ -123,19 +138,20 @@ async function main() {
     return;
   }
 
-  console.log(`🗑️ The following ${tagsToDelete.length} release(s) will be completely wiped:`);
+  console.log(`🗑️ The following ${tagsToDelete.length} release(s) will be processed:`);
   tagsToDelete.forEach((r) => console.log(`   - ${r.tagName} (${r.name}) [id=${r.id}]`));
   console.log('');
 
   for (const rel of tagsToDelete) {
     console.log(`⏳ Processing release ${rel.tagName} (id=${rel.id})...`);
 
-    // 1) List assets for the release (via gh release view)
+    // 1) List assets for the release (via gh api for more control and paging if needed)
     let assets: Array<{ id: number; name: string }> = [];
     try {
-      const assetsOut = runCmd(`gh release view "${rel.tagName}" --json assets`, true);
-      const parsed = JSON.parse(assetsOut || '{}');
-      assets = Array.isArray(parsed.assets) ? parsed.assets.map((a: any) => ({ id: a.id, name: a.name })) : [];
+      // Use API to avoid heavy CLI wrappers; jq here keeps returned objects small-ish
+      const assetsOut = runCmd(`gh api repos/${owner}/${repo}/releases/${rel.id} --jq '.assets'`, true);
+      const parsed = JSON.parse(assetsOut || '[]');
+      assets = Array.isArray(parsed) ? parsed.map((a: any) => ({ id: a.id, name: a.name })) : [];
     } catch (err: any) {
       console.warn(`   ⚠️ Could not list assets for ${rel.tagName}: ${(err && err.message) || String(err)}`);
     }
@@ -175,7 +191,11 @@ async function main() {
   }
 
   console.log('🎉 Cleanup Complete! Remaining Active Releases:');
-  execSync('gh release list', { stdio: 'inherit' });
+  if (!DRY_RUN) {
+    execSync('gh release list', { stdio: 'inherit' });
+  } else {
+    console.log('[dry-run] Skipping final gh release list');
+  }
 }
 
 main().catch((err) => {
