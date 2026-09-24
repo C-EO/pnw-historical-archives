@@ -117,10 +117,9 @@ async function getCheckpoint(): Promise<number> {
       if (parsed.last_attack_id) return parsed.last_attack_id;
     }
   } catch {
-    console.log('ℹ️ No existing checkpoint found in R2. Starting fresh or using default minimum.');
+    console.log('ℹ️ No existing checkpoint found in R2. Starting fresh.');
   }
 
-  // Fallback baseline: start from 1 (or recent era if preferred)
   return 1;
 }
 
@@ -162,51 +161,8 @@ async function main() {
   const workDir = path.resolve('./temp_attacks');
   if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 
-  const instance = await DuckDBInstance.create(':memory:');
-  const conn = await instance.connect();
-
-  // Create staging table for attacks
-  await conn.run(`
-    CREATE TABLE attacks_stage (
-      id BIGINT,
-      date VARCHAR,
-      war_id BIGINT,
-      att_id BIGINT,
-      def_id BIGINT,
-      type VARCHAR,
-      victor BIGINT,
-      success INTEGER,
-      infra_destroyed DOUBLE,
-      infra_destroyed_value DOUBLE,
-      money_stolen DOUBLE,
-      money_looted DOUBLE,
-      food_looted DOUBLE,
-      coal_looted DOUBLE,
-      oil_looted DOUBLE,
-      uranium_looted DOUBLE,
-      iron_looted DOUBLE,
-      bauxite_looted DOUBLE,
-      lead_looted DOUBLE,
-      gasoline_looted DOUBLE,
-      munitions_looted DOUBLE,
-      steel_looted DOUBLE,
-      aluminum_looted DOUBLE,
-      military_salvage_steel DOUBLE,
-      military_salvage_aluminum DOUBLE,
-      att_soldiers_lost INTEGER,
-      def_soldiers_lost INTEGER,
-      att_tanks_lost INTEGER,
-      def_tanks_lost INTEGER,
-      att_aircraft_lost INTEGER,
-      def_aircraft_lost INTEGER,
-      att_ships_lost INTEGER,
-      def_ships_lost INTEGER,
-      att_gas_used DOUBLE,
-      def_gas_used DOUBLE,
-      att_mun_used DOUBLE,
-      def_mun_used DOUBLE
-    );
-  `);
+  const tempJsonl = path.join(workDir, 'attacks_staging.jsonl');
+  if (fs.existsSync(tempJsonl)) fs.unlinkSync(tempJsonl);
 
   let currentMinId = await getCheckpoint();
   console.log(`📍 Starting ingestion from attack ID: ${currentMinId}`);
@@ -226,51 +182,14 @@ async function main() {
       break;
     }
 
-    const appender = await conn.createAppender('attacks_stage');
     for (const a of attacks) {
       const aid = Number(a.id);
       if (aid > highestId) highestId = aid;
-
-      appender.appendBigInt(BigInt(aid));
-      appender.appendVarchar(String(a.date || ''));
-      appender.appendBigInt(BigInt(a.war_id || 0));
-      appender.appendBigInt(BigInt(a.att_id || 0));
-      appender.appendBigInt(BigInt(a.def_id || 0));
-      appender.appendVarchar(String(a.type || ''));
-      appender.appendBigInt(BigInt(a.victor || 0));
-      appender.appendInteger(Number(a.success) || 0);
-      appender.appendDouble(Number(a.infra_destroyed) || 0);
-      appender.appendDouble(Number(a.infra_destroyed_value) || 0);
-      appender.appendDouble(Number(a.money_stolen) || 0);
-      appender.appendDouble(Number(a.money_looted) || 0);
-      appender.appendDouble(Number(a.food_looted) || 0);
-      appender.appendDouble(Number(a.coal_looted) || 0);
-      appender.appendDouble(Number(a.oil_looted) || 0);
-      appender.appendDouble(Number(a.uranium_looted) || 0);
-      appender.appendDouble(Number(a.iron_looted) || 0);
-      appender.appendDouble(Number(a.bauxite_looted) || 0);
-      appender.appendDouble(Number(a.lead_looted) || 0);
-      appender.appendDouble(Number(a.gasoline_looted) || 0);
-      appender.appendDouble(Number(a.munitions_looted) || 0);
-      appender.appendDouble(Number(a.steel_looted) || 0);
-      appender.appendDouble(Number(a.aluminum_looted) || 0);
-      appender.appendDouble(Number(a.military_salvage_steel) || 0);
-      appender.appendDouble(Number(a.military_salvage_aluminum) || 0);
-      appender.appendInteger(Number(a.att_soldiers_lost) || 0);
-      appender.appendInteger(Number(a.def_soldiers_lost) || 0);
-      appender.appendInteger(Number(a.att_tanks_lost) || 0);
-      appender.appendInteger(Number(a.def_tanks_lost) || 0);
-      appender.appendInteger(Number(a.att_aircraft_lost) || 0);
-      appender.appendInteger(Number(a.def_aircraft_lost) || 0);
-      appender.appendInteger(Number(a.att_ships_lost) || 0);
-      appender.appendInteger(Number(a.def_ships_lost) || 0);
-      appender.appendDouble(Number(a.att_gas_used) || 0);
-      appender.appendDouble(Number(a.def_gas_used) || 0);
-      appender.appendDouble(Number(a.att_mun_used) || 0);
-      appender.appendDouble(Number(a.def_mun_used) || 0);
-      appender.endRow();
     }
-    await appender.close();
+
+    // Append batch directly to JSON Lines file
+    const lines = attacks.map((a: any) => JSON.stringify(a)).join('\n') + '\n';
+    fs.appendFileSync(tempJsonl, lines, 'utf-8');
 
     totalIngested += attacks.length;
     currentMinId = highestId + 1;
@@ -284,18 +203,57 @@ async function main() {
 
   if (totalIngested === 0) {
     console.log('✨ All attacks are already up to date. Exiting.');
-    conn.disconnectSync();
     return;
   }
 
-  // Export to optimized, sorted, ZSTD-compressed Parquet file
+  // Compile JSONL to optimized ZSTD Parquet via DuckDB
   const outputParquet = path.join(workDir, `attacks-${currentYear}.parquet`);
-  console.log(`📦 Compiling DuckDB table into sorted, compressed Parquet (${outputParquet})...`);
+  console.log(`📦 Compiling DuckDB JSONL stream into sorted, compressed Parquet (${outputParquet})...`);
+
+  const instance = await DuckDBInstance.create(':memory:');
+  const conn = await instance.connect();
 
   await conn.run(`
     COPY (
-      SELECT * 
-      FROM attacks_stage
+      SELECT 
+        CAST(id AS BIGINT) AS id,
+        CAST(date AS VARCHAR) AS date,
+        CAST(war_id AS BIGINT) AS war_id,
+        CAST(att_id AS BIGINT) AS att_id,
+        CAST(def_id AS BIGINT) AS def_id,
+        CAST(type AS VARCHAR) AS type,
+        CAST(victor AS BIGINT) AS victor,
+        COALESCE(CAST(success AS INTEGER), 0) AS success,
+        COALESCE(CAST(infra_destroyed AS DOUBLE), 0.0) AS infra_destroyed,
+        COALESCE(CAST(infra_destroyed_value AS DOUBLE), 0.0) AS infra_destroyed_value,
+        COALESCE(CAST(money_stolen AS DOUBLE), 0.0) AS money_stolen,
+        COALESCE(CAST(money_looted AS DOUBLE), 0.0) AS money_looted,
+        COALESCE(CAST(food_looted AS DOUBLE), 0.0) AS food_looted,
+        COALESCE(CAST(coal_looted AS DOUBLE), 0.0) AS coal_looted,
+        COALESCE(CAST(oil_looted AS DOUBLE), 0.0) AS oil_looted,
+        COALESCE(CAST(uranium_looted AS DOUBLE), 0.0) AS uranium_looted,
+        COALESCE(CAST(iron_looted AS DOUBLE), 0.0) AS iron_looted,
+        COALESCE(CAST(bauxite_looted AS DOUBLE), 0.0) AS bauxite_looted,
+        COALESCE(CAST(lead_looted AS DOUBLE), 0.0) AS lead_looted,
+        COALESCE(CAST(gasoline_looted AS DOUBLE), 0.0) AS gasoline_looted,
+        COALESCE(CAST(munitions_looted AS DOUBLE), 0.0) AS munitions_looted,
+        COALESCE(CAST(steel_looted AS DOUBLE), 0.0) AS steel_looted,
+        COALESCE(CAST(aluminum_looted AS DOUBLE), 0.0) AS aluminum_looted,
+        COALESCE(CAST(military_salvage_steel AS DOUBLE), 0.0) AS military_salvage_steel,
+        COALESCE(CAST(military_salvage_aluminum AS DOUBLE), 0.0) AS military_salvage_aluminum,
+        COALESCE(CAST(att_soldiers_lost AS INTEGER), 0) AS att_soldiers_lost,
+        COALESCE(CAST(def_soldiers_lost AS INTEGER), 0) AS def_soldiers_lost,
+        COALESCE(CAST(att_tanks_lost AS INTEGER), 0) AS att_tanks_lost,
+        COALESCE(CAST(def_tanks_lost AS INTEGER), 0) AS def_tanks_lost,
+        COALESCE(CAST(att_aircraft_lost AS INTEGER), 0) AS att_aircraft_lost,
+        COALESCE(CAST(def_aircraft_lost AS INTEGER), 0) AS def_aircraft_lost,
+        COALESCE(CAST(att_ships_lost AS INTEGER), 0) AS att_ships_lost,
+        COALESCE(CAST(def_ships_lost AS INTEGER), 0) AS def_ships_lost,
+        COALESCE(CAST(att_gas_used AS DOUBLE), 0.0) AS att_gas_used,
+        COALESCE(CAST(def_gas_used AS DOUBLE), 0.0) AS def_gas_used,
+        COALESCE(CAST(att_mun_used AS DOUBLE), 0.0) AS att_mun_used,
+        COALESCE(CAST(def_mun_used AS DOUBLE), 0.0) AS def_mun_used
+      FROM read_json_auto('${tempJsonl.replace(/\\/g, '/')}')
       ORDER BY war_id ASC, date ASC
     ) TO '${outputParquet.replace(/\\/g, '/')}' 
     (FORMAT PARQUET, COMPRESSION 'ZSTD');
