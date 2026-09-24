@@ -184,18 +184,18 @@ async function run() {
     console.log("ℹ️ No existing checkpoint found in R2. Starting fresh.");
   }
 
-  // 1. Probe for initial attack ID and latest attack ID
+  // 1. Probe for earliest attack ID (ASC) and latest attack ID (DESC)
   console.log("🔍 Probing attack ID range...");
-  const probeQuery = `
-    query Probe($min_id: Int) {
-      warattacks(min_id: $min_id, first: 1) {
+  const ascProbeQuery = `
+    query ProbeAsc($min_id: Int) {
+      warattacks(min_id: $min_id, first: 1, orderBy: [{ column: ID, order: ASC }]) {
         paginatorInfo { total count }
         data { id }
       }
     }
   `;
-  const probeData = await fetchGraphQL(probeQuery, { min_id: startAttackId });
-  const firstAttack = probeData?.warattacks?.data?.[0];
+  const ascData = await fetchGraphQL(ascProbeQuery, { min_id: startAttackId });
+  const firstAttack = ascData?.warattacks?.data?.[0];
 
   if (!firstAttack) {
     console.log("✨ No new attacks found to ingest. Up to date!");
@@ -203,7 +203,7 @@ async function run() {
   }
 
   const actualStartId = parseInt(firstAttack.id, 10);
-  const totalAttacks = probeData?.warattacks?.paginatorInfo?.total || 670000;
+  const totalAttacks = ascData?.warattacks?.paginatorInfo?.total || 670000;
 
   // Find latest attack ID
   let latestId = actualStartId + totalAttacks + 5000;
@@ -217,7 +217,7 @@ async function run() {
     // Keep estimated upper bound
   }
 
-  console.log(`📊 Ingestion Target: ID ${actualStartId} -> ~${latestId} (~${totalAttacks.toLocaleString()} attacks)`);
+  console.log(`📊 Ingestion Target: ID ${actualStartId} -> ${latestId} (~${totalAttacks.toLocaleString()} attacks)`);
 
   // 2. Build Work Chunk Queue
   interface Chunk {
@@ -226,7 +226,7 @@ async function run() {
   }
   const queue: Chunk[] = [];
   for (let current = actualStartId; current <= latestId; current += CHUNK_SIZE) {
-    queue.push({ minId: current, maxId: current + CHUNK_SIZE - 1 });
+    queue.push({ minId: current, maxId: Math.min(current + CHUNK_SIZE - 1, latestId + 1000) });
   }
 
   console.log(`⚡ Created ${queue.length} work chunks. Launching ${CONCURRENCY} parallel workers...`);
@@ -245,7 +245,7 @@ async function run() {
   async function worker(workerId: number) {
     const batchQuery = `
       query GetChunk($min_id: Int, $max_id: Int, $first: Int) {
-        warattacks(min_id: $min_id, max_id: $max_id, first: $first) {
+        warattacks(min_id: $min_id, max_id: $max_id, first: $first, orderBy: [{ column: ID, order: ASC }]) {
           data { ${ATTACK_FIELDS} }
         }
       }
@@ -273,7 +273,7 @@ async function run() {
         const batchMax = Math.max(...attacks.map((a) => parseInt(a.id, 10)));
         if (batchMax > maxIngestedId) maxIngestedId = batchMax;
 
-        if (totalIngested % 10000 < 1000) {
+        if (totalIngested % 25000 < 1000) {
           console.log(`⚡ Progress: ${totalIngested.toLocaleString()} attacks ingested (Max ID: ${maxIngestedId})...`);
         }
 
