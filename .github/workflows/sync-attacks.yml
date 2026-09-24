@@ -1,0 +1,47 @@
+name: Sync Attacks to Cloudflare R2
+
+on:
+  schedule:
+    # Runs nightly at 00:30 UTC
+    - cron: '30 0 * * *'
+  workflow_dispatch:
+    inputs:
+      manual_start_id:
+        description: 'Optional manual start attack ID (leave empty to resume from checkpoint)'
+        required: false
+        default: ''
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Up to 6 hours for initial massive backfill if needed
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10
+
+      - name: Install Dependencies
+        run: |
+          pnpm install
+          pnpm add -D @aws-sdk/client-s3 @duckdb/node-api tsx
+
+      - name: Run Attack Sync Engine
+        env:
+          PNW_UNLIMITED_API_KEY: ${{ secrets.PNW_UNLIMITED_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          MANUAL_START_ATTACK_ID: ${{ github.event.inputs.manual_start_id }}
+        run: |
+          npx tsx scripts/sync-attacks.ts
