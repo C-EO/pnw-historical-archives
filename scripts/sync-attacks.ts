@@ -15,7 +15,7 @@ const MANUAL_START_ID = process.env.MANUAL_START_ATTACK_ID
   : null;
 
 const CHECKPOINT_KEY = "attacks/checkpoint.json";
-const CONCURRENCY = 6;
+const CONCURRENCY = 4;
 const CHUNK_SIZE = 25000;
 
 if (!API_KEY || !R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET_NAME) {
@@ -96,7 +96,7 @@ const ATTACK_FIELDS = `
   food_looted
 `;
 
-async function fetchGraphQL(query: string, variables: Record<string, any> = {}, retries = 3): Promise<any> {
+async function fetchGraphQL(query: string, variables: Record<string, any> = {}, retries = 8): Promise<any> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const res = await fetch(`${PNW_API_URL}?api_key=${API_KEY}`, {
@@ -104,20 +104,37 @@ async function fetchGraphQL(query: string, variables: Record<string, any> = {}, 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query, variables }),
       });
+
+      // Handle 429 gracefully with smart backoff
+      if (res.status === 429) {
+        const retryAfterHeader = res.headers.get("retry-after");
+        const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+        const delayMs = retryAfterSec 
+          ? (retryAfterSec + 1) * 1000 
+          : Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random() * 1000);
+        
+        console.warn(`⏳ Rate limit (429) hit. Pausing worker for ${(delayMs / 1000).toFixed(1)}s (Attempt ${attempt}/${retries})...`);
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       }
+
       const data = await res.json();
       if (data.errors && data.errors.length > 0) {
         throw new Error(data.errors.map((e: any) => e.message).join(", "));
       }
       return data.data;
-    } catch (err) {
+    } catch (err: any) {
       if (attempt === retries) throw err;
-      await new Promise((r) => setTimeout(r, 1000 * attempt));
+      const backoff = Math.min(15000, 1000 * attempt + Math.random() * 1000);
+      await new Promise((r) => setTimeout(r, backoff));
     }
   }
 }
+
 
 async function getCheckpointFromR2(): Promise<Checkpoint | null> {
   try {
@@ -280,6 +297,7 @@ async function run() {
 
         chunkMin = batchMax + 1;
         if (attacks.length < 1000) break;
+        await new Promise((r) => setTimeout(r, 200)); // 200ms spacing between queries
       }
     }
   }
