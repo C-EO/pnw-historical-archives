@@ -270,7 +270,6 @@ async function main() {
       appender.appendDouble(Number(a.def_mun_used) || 0);
       appender.endRow();
     }
-    await appender.flush();
     await appender.close();
 
     totalIngested += attacks.length;
