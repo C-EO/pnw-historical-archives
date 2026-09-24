@@ -16,14 +16,14 @@ const MANUAL_START_ID = process.env.MANUAL_START_ATTACK_ID
 
 const CHECKPOINT_KEY = "attacks/checkpoint.json";
 const CONCURRENCY = 6;
-const CHUNK_SIZE = 25000; // Attack ID span per work chunk
+const CHUNK_SIZE = 25000;
 
 if (!API_KEY || !R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET_NAME) {
   console.error("❌ Missing required environment variables.");
   process.exit(1);
 }
 
-// S3 Client configured for Cloudflare R2
+// S3 Client configured for Cloudflare R2 (forcePathStyle is REQUIRED for R2)
 const s3 = new S3Client({
   region: "auto",
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -31,6 +31,7 @@ const s3 = new S3Client({
     accessKeyId: R2_ACCESS_KEY_ID,
     secretAccessKey: R2_SECRET_ACCESS_KEY,
   },
+  forcePathStyle: true,
   requestChecksumCalculation: "WHEN_REQUIRED",
   responseChecksumValidation: "WHEN_REQUIRED",
 });
